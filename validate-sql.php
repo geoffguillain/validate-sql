@@ -5,6 +5,8 @@
 
 if ( defined( 'WP_CLI' ) && WP_CLI ) {
 
+	require_once 'sql-parser.php';
+
 	/**
 	 * Check if the .sql file is ready to be imported.
 	 */
@@ -30,15 +32,16 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 					$this->validate_sql_file( $path );
 				} elseif ( in_array( $ext, $archive_extensions ) ) {
 					$archive   = new PharData( $path );
-					$sql_count = count_sql( $archive );
+					$sql_count = $this->count_sql( $archive );
 					if ( $sql_count > 1 ) {
-						echo 'There are more than one .sql file in the archive. Please provide only one .sql file.';
+						WP_CLI::error( 'There are more than one .sql file in the archive. Please provide only one .sql file.' );
 					} elseif ( 0 === $sql_count ) {
-						echo 'There is no .sql file in the archive.';
+						WP_CLI::error( 'There is no .sql file in the archive.' );
 					} else {
-						// TODO: Extract the SQL file and return the path.
-						// $path = $this->extract_sql( $archive );.
-						// $this->validate_sql_file( $path );.
+						// Extract the SQL file and return the path.
+						WP_CLI::line( 'Extracting the archive...' );
+						$path = $this->extract_sql( $archive );
+						$this->validate_sql_file( $path );
 					}
 				} else {
 					WP_CLI::error( 'Please provide a .sql file or an archive (gz, or zip) with one .sql file inside.' );
@@ -71,11 +74,14 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			foreach ( $archive as $file ) {
 				$ext = pathinfo( $file, PATHINFO_EXTENSION );
 				if ( 'sql' === $ext ) {
-					$archive->extractTo( './', basename( $file ) );
+					try {
+						$archive->extractTo( '.', basename( $file ) );
+					} catch ( Exception $e ) {
+						WP_CLI::error( 'We are unable to extract the archive. ' . $e->getMessage() );
+					}
 				}
 			}
 			return $file;
-			// TODO: test if extract is succesful.
 		}
 		
 
@@ -85,8 +91,9 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		 * @param string $path Path to SQL file.
 		 */
 		private function validate_sql_file( $path ) {
-
-			$sql_file = file_get_contents( $path );
+			$sql_file  = file_get_contents( $path );
+			$sql_file  = remove_comments( $sql_file );
+			$sql_array = split_sql_file( $sql_file, ';' );
 
 			$core_tables = array(
 				'wp_commentmeta',
@@ -122,12 +129,14 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			$this->validate_drop_table( $sql_file, $core_tables, $multisite_tables );
 			$this->validate_create_table( $sql_file, $core_tables, $multisite_tables );
 			$this->validate_database( $sql_file );
+			$this->validate_settings( $sql_array );
 
 			// multisite validation rules.
 			WP_CLI::line( '' );
-			WP_CLI::confirm( WP_CLI::colorize( '%yIs the provided database for a multisite WordPress?' ) );
+			WP_CLI::confirm( WP_CLI::colorize( '%yIs the provided database for a multisite WordPress?%n' ) );
 			$this->validate_drop_table_multisite( $sql_file, $multisite_tables );
 			$this->validate_create_table_multisite( $sql_file, $multisite_tables );
+			$this->validate_wpblogs( $sql_array );
 
 		}
 
@@ -140,7 +149,7 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			
 			// Check for tables with wp_ prefix.
 			WP_CLI::line( 'Checking for wp_ prefix...' );
-			preg_match_all( '/CREATE TABLE(.*wp_).*\(/', $sql_file, $wp_matches );
+			preg_match_all( '/CREATE TABLE ([`\'"]?.*wp_.*[`\'"]?) \(/', $sql_file, $wp_matches );
 			if ( count( $wp_matches[0] ) > 0 ) {
 				WP_CLI::success( 'We have found ' . count( $wp_matches[0] ) . ' tables with wp_ prefix' );
 			} else {
@@ -148,12 +157,10 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			}
 			
 			// Check for tables with prefix that is not wp_.
-			preg_match_all( '/CREATE TABLE(?!.*?wp_).*\(/', $sql_file, $nonwp_matches );
-			if ( count( $nonwp_matches[0] ) > 0 ) {
-				WP_CLI::warning( 'Error: We have found ' . count( $nonwp_matches[0] ) . 'tables with a wrong prefix' );
-				foreach ( $nonwp_matches[0] as $table ) {
-					WP_CLI::warning( $table );
-				}
+			preg_match_all( '/CREATE TABLE ([`\'"]?(?!.*wp_).*[`\'"]?) \(/', $sql_file, $nonwp_matches );
+			if ( count( $nonwp_matches[1] ) > 0 ) {
+				WP_CLI::warning( 'Error: We have found ' . count( $nonwp_matches[1] ) . ' tables with a wrong prefix' );
+				WP_CLI::error_multi_line( $nonwp_matches[1] );
 			} else {
 				WP_CLI::success( 'We have not found any table with a wrong prefix' );
 			}
@@ -320,6 +327,60 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			}
 			
 			return count( $multisite_matches[1] );
+		}
+
+		/**
+		 * Check entries of the wp_blogs table.
+		 * 
+		 * @param array $sql_array The entries of the specific table as an array.
+		 */
+		private function validate_wpblogs( $sql_array ) {
+
+			WP_CLI::line( '' );
+			WP_CLI::line( 'Checking for wp_blogs table...' );
+
+			$entries = insert_to_array( $sql_array, 'wp_blogs' );
+			$lookfor = array( 'blog_id', 'site_id', 'domain', 'path' );
+			
+			
+			// display tables.
+			WP_CLI::line( 'We have found ' . count( $entries ) . ' entries.' );
+			WP_CLI\Utils\format_items( 'table', $entries, $lookfor );
+			foreach ( $entries as $entry ) {
+				if ( ! isset( $entry['domain'] ) || '' === $entry['domain'] ) {
+					WP_CLI::warning( 'No domain set up for blog_id ' . $entry['blog_id'] );
+				}
+				if ( ! isset( $entry['path'] ) || '' === $entry['path'] ) {
+					WP_CLI::warning( 'No path set up for blog_id ' . $entry['blog_id'] );
+				}
+			}
+		}
+
+		/**
+		 * Check siteurl and home of the wp_otions table.
+		 * 
+		 * @param array $sql_array The entries of the specific table as an array.
+		 */
+		private function validate_settings( $sql_array ) {
+
+			WP_CLI::line( '' );
+			WP_CLI::line( 'Checking for siteurl and home options...' );
+
+			$entries = insert_to_array( $sql_array, 'wp_options' );
+			$lookfor = array( 'option_name', 'option_value' );
+			
+			if ( ! empty( $entries ) ) {
+				foreach ( $entries as $key => $entry ) {
+					if ( 'siteurl' !== $entry['option_name'] && 'home' !== $entry['option_name'] ) {
+						unset( $entries[ $key ] );
+					}
+				}
+				WP_CLI::line( 'We have found ' . count( $entries ) . ' entries.' );
+				WP_CLI\Utils\format_items( 'table', $entries, $lookfor );
+			} else {
+				WP_CLI::warning( 'Unable to find the wp_options table.' );
+			}
+
 		}
 
 	}
