@@ -12,6 +12,49 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 	 */
 	class ValidateSQLWPCLI {
 
+		private $drop_tables = array( 
+			'wp'    => array(),
+			'nonwp' => array(),
+		);
+
+		private $create_tables = array( 
+			'wp'    => array(),
+			'nonwp' => array(),
+		);
+
+		private $charsets = array();
+
+		private $database_statements = array();
+
+		private $options_entries = array();
+
+		private $blogs_entries = array();
+
+		private $core_tables = array(
+			'wp_commentmeta',
+			'wp_comments',
+			'wp_links',
+			'wp_options',
+			'wp_postmeta',
+			'wp_posts',
+			'wp_terms',
+			'wp_termmeta',
+			'wp_term_relationships',
+			'wp_term_taxonomy',
+			'wp_usermeta',
+			'wp_users',
+		);
+
+		private $multisite_tables = array(
+			'wp_blogs',
+			'wp_blogmeta',
+			'wp_blog_versions',
+			'wp_registration_log',
+			'wp_signups',
+			'wp_site',
+			'wp_sitemeta',
+		);
+
 		/**
 		 * CLI command that takes a .sql file (required) and validate multiple rules before importing.
 		 *
@@ -83,87 +126,104 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			}
 			return $file;
 		}
-		
 
 		/**
 		 * Process the SQL file trought multiple validation steps.
 		 * 
-		 * @param string $path Path to SQL file.
+		 * @param string $file Path to SQL file.
+		 * @param string $delimiter The delimiter used in the SQL file, default ";".
 		 */
-		private function validate_sql_file( $path ) {
-			$sql_file  = file_get_contents( $path );
-			$sql_file  = remove_comments( $sql_file );
-			$sql_array = split_sql_file( $sql_file, ';' );
+		private function validate_sql_file( $file, $delimiter = ';' ) {
 
-			$core_tables = array(
-				'wp_commentmeta',
-				'wp_comments',
-				'wp_links',
-				'wp_options',
-				'wp_postmeta',
-				'wp_posts',
-				'wp_terms',
-				'wp_termmeta',
-				'wp_term_relationships',
-				'wp_term_taxonomy',
-				'wp_usermeta',
-				'wp_users',
-			);
+			set_time_limit( 0 );
+			if ( is_file( $file ) === true ) {
+				$file = fopen( $file, 'r' );
+				if ( is_resource( $file ) === true ) {
+					$query = array();
+					while ( feof( $file ) === false ) {
+						$query[] = fgets( $file );
+						if ( preg_match( '/' . preg_quote( $delimiter, '/' ) . '$/m', end( $query ) ) ) {
+							$query = trim( implode( '', $query ) );
+							$query = remove_comment( $query );
 
-			$multisite_tables = array(
-				'wp_blogs',
-				'wp_blogmeta',
-				'wp_blog_versions',
-				'wp_registration_log',
-				'wp_signups',
-				'wp_site',
-				'wp_sitemeta',
-			);
+							$this->get_drop_tables( $query );
+							$this->get_create_tables( $query );
+							$this->get_charset( $query );
+							$this->get_database_statements( $query );
+							$this->get_options( $query );
+							$this->get_blogs( $query );
 
-			if ( false === $sql_file ) {
+							while ( ob_get_level() > 0 ) {
+								ob_end_flush();
+							}
+							flush();
+						}
+						if ( is_string( $query ) === true ) {
+							$query = array();
+						}
+					}
+
+					$this->validate_prefix( $this->drop_tables, $this->create_tables );
+					$this->validate_matching_drop( $this->drop_tables, $this->create_tables );
+					$this->validate_charset( $this->charsets );
+					$this->validate_drop_table( $this->drop_tables );
+					$this->validate_create_table( $this->create_tables );
+					$this->validate_database_statements( $this->database_statements );
+					$this->validate_options_entries( $this->options_entries );
+
+					WP_CLI::line( '' );
+					WP_CLI::confirm( WP_CLI::colorize( '%yIs the provided database for a multisite WordPress?%n' ) );
+					$this->validate_drop_table_multisite( $this->drop_tables );
+					$this->validate_create_table_multisite( $this->create_tables );
+					$this->validate_blogs_entries( $this->blogs_entries );
+
+					return fclose( $file );
+				}
+			} else {
 				WP_CLI::error( "We can't find the SQL file" );
 			}
-			// Common rules.
-			$this->validate_prefix( $sql_file );
-			$this->validate_charset( $sql_file );
-			$this->validate_drop_table( $sql_file, $core_tables, $multisite_tables );
-			$this->validate_create_table( $sql_file, $core_tables, $multisite_tables );
-			$this->validate_database( $sql_file );
-			$this->validate_settings( $sql_array );
-
-			// multisite validation rules.
-			WP_CLI::line( '' );
-			WP_CLI::confirm( WP_CLI::colorize( '%yIs the provided database for a multisite WordPress?%n' ) );
-			$this->validate_drop_table_multisite( $sql_file, $multisite_tables );
-			$this->validate_create_table_multisite( $sql_file, $multisite_tables );
-			$this->validate_wpblogs( $sql_array );
 
 		}
 
 		/** 
-		 * Check the prefix that are set up in the SQL file.
+		 * Check the drop tables that are set up in the SQL file.
 		 * 
 		 * @param string $sql_file The SQL data.
 		 */
-		private function validate_prefix( $sql_file ) {
-			
+		private function get_drop_tables( $sql_file ) {
+
 			// Check for tables with wp_ prefix.
-			WP_CLI::line( 'Checking for wp_ prefix...' );
-			preg_match_all( '/CREATE TABLE ([`\'"]?.*wp_.*[`\'"]?) \(/', $sql_file, $wp_matches );
-			if ( count( $wp_matches[0] ) > 0 ) {
-				WP_CLI::success( 'We have found ' . count( $wp_matches[0] ) . ' tables with wp_ prefix' );
-			} else {
-				WP_CLI::warning( 'We have not found any table with the wp prefix.' );
+			preg_match( '/DROP TABLE (IF EXISTS )?([`\'"]?.*wp_.*[`\'"]?);/', $sql_file, $wp_match );
+			if ( isset( $wp_match[2] ) && ! empty( $wp_match[2] ) ) {
+				$this->drop_tables['wp'][] = trim( $wp_match[2], '/[\'" `]/' );
 			}
 			
 			// Check for tables with prefix that is not wp_.
-			preg_match_all( '/CREATE TABLE ([`\'"]?(?!.*wp_).*[`\'"]?) \(/', $sql_file, $nonwp_matches );
-			if ( count( $nonwp_matches[1] ) > 0 ) {
-				WP_CLI::warning( 'Error: We have found ' . count( $nonwp_matches[1] ) . ' tables with a wrong prefix' );
-				WP_CLI::error_multi_line( $nonwp_matches[1] );
-			} else {
-				WP_CLI::success( 'We have not found any table with a wrong prefix' );
+			preg_match( '/DROP TABLE (IF EXISTS )?([`\'"]?(?!.*wp_).*[`\'"]?);/', $sql_file, $nonwp_match );
+			if ( isset( $nonwp_match[2] ) && ! empty( $nonwp_match[2] ) ) {
+				$this->drop_tables['nonwp'][] = trim( $nonwp_match[2], '/[\'" `]/' );
 			}
+		}
+
+		/** 
+		 * Check the create tables that are set up in the SQL file.
+		 * 
+		 * @param string $sql_file The SQL data.
+		 */
+		private function get_create_tables( $sql_file ) {
+
+			// Check for tables with wp_ prefix.
+			preg_match( '/CREATE TABLE ([`\'"]?.*wp_.*[`\'"]?) \(/', $sql_file, $wp_match );
+			if ( isset( $wp_match[1] ) && ! empty( $wp_match[1] ) ) {
+				$this->create_tables['wp'][] = trim( $wp_match[1], '/[\'" `]/' );
+			}
+			
+			// Check for tables with prefix that is not wp_.
+			preg_match( '/CREATE TABLE ([`\'"]?(?!.*wp_).*[`\'"]?) \(/', $sql_file, $nonwp_match );
+			if ( isset( $nonwp_match[1] ) && ! empty( $nonwp_match[1] ) ) {
+				$this->create_tables['nonwp'][] = trim( $nonwp_match[1], '/[\'" `]/' );
+			}
+
 		}
 
 		/**
@@ -171,90 +231,12 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		 * 
 		 * @param string $sql_file The SQL data.
 		 */
-		private function validate_charset( $sql_file ) {
-			WP_CLI::line( '' );
-			WP_CLI::line( 'Checking for charset...' );
-
-			preg_match_all( '/charset(=| SET )(utf8mb4|latin1|utf8).*/i', $sql_file, $matches );
-
-			if ( count( $matches[0] ) > 0 ) {
-				$charset_to_convert = preg_grep( '/(latin1|^utf8$)/i', $matches[2] );
-				if ( empty( $charset_to_convert ) ) {
-					WP_CLI::success( 'We have found a UTF8MB4 charset' );
-				} else {
-					WP_CLI::warning( 'We have found some latin1 or UTF8 charsets that should be converted to UTF8MB4' );
-				}
-			} else {
-				WP_CLI::warning( 'We have not found any UTF8MB4 charset, please check your SQL file' );
-			}
-		}
-
-		/**
-		 * Check if there is DROP TABLE statements
-		 * 
-		 * @param string $sql_file The SQL data.
-		 * @param array  $core_tables The WordPress core tables.
-		 * @param array  $multisite_tables The WordPress multisite tables.
-		 * 
-		 * return int Number of DROP TABLE statements.
-		 */
-		private function validate_drop_table( $sql_file, $core_tables, $multisite_tables ) {
-			WP_CLI::line( '' );
-			WP_CLI::line( 'Checking for DROP TABLE statements...' );
-
-			$tables_size      = count( $core_tables );
-			$core_tables      = implode( '|', $core_tables );
-			$multisite_tables = implode( '|', $multisite_tables );
-			preg_match_all( '/DROP TABLE.*(' . $core_tables . ')/i', $sql_file, $core_matches );
+		private function get_charset( $sql_file ) {
 			
-			if ( count( $core_matches[1] ) === $tables_size ) {
-				WP_CLI::success( 'We have found a DROP TABLE statement for each core tables' );
-			} else {
-				WP_CLI::warning( 'There is only ' . count( $core_matches[1] ) . ' DROP TABLE statements while there are ' . $tables_size . ' core tables' );
+			if ( preg_match( '/CHARSET(=| SET )(\w*)/', $sql_file, $match ) ) {
+				$this->charsets[] = $match[2];
 			}
 
-
-			preg_match_all( '/DROP TABLE(?!.*?(' . $core_tables . '|' . $multisite_tables . '|wp_\d_.*)).*/i', $sql_file, $extra_matches );
-			if ( count( $extra_matches[0] ) > 0 ) {
-				WP_CLI::warning( 'We have found some custom tables' );
-				WP_CLI::error_multi_line( $extra_matches[0] );
-			}
-			
-			return count( $core_matches[1] ) + count( $extra_matches[0] );
-		}
-
-		/**
-		 * Check if there is CREATE TABLE statements.
-		 * 
-		 * @param string $sql_file The SQL data.
-		 * @param array  $core_tables The WordPress core tables.
-		 * @param array  $multisite_tables The WordPress multisite tables.
-		 * 
-		 * return int Number of DROP TABLE statements.
-		 */
-		private function validate_create_table( $sql_file, $core_tables, $multisite_tables ) {
-			WP_CLI::line( '' );
-			WP_CLI::line( 'Checking for CREATE TABLE statements...' );
-
-			$tables_size      = count( $core_tables );
-			$core_tables      = implode( '|', $core_tables );
-			$multisite_tables = implode( '|', $multisite_tables );
-
-			preg_match_all( '/CREATE TABLE.*(' . $core_tables . ')/i', $sql_file, $core_matches );
-			
-			if ( count( $core_matches[1] ) === $tables_size ) {
-				WP_CLI::success( 'We have found a CREATE TABLE statement for each core tables' );
-			} else {
-				WP_CLI::warning( 'There is only ' . count( $core_matches[1] ) . ' CREATE TABLE statements while there are ' . $tables_size . ' core tables' );
-			}
-
-			preg_match_all( '/CREATE TABLE(?!.*?(' . $core_tables . '|' . $multisite_tables . '|wp_\d_.*)).*/i', $sql_file, $extra_matches );
-			if ( count( $extra_matches[0] ) > 0 ) {
-				WP_CLI::warning( 'We have found some custom tables' );
-				WP_CLI::error_multi_line( $extra_matches[0] );
-			}
-			
-			return count( $core_matches[1] ) + count( $extra_matches[0] );
 		}
 
 		/**
@@ -262,91 +244,218 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		 * 
 		 * @param string $sql_file The SQL data.
 		 */
-		private function validate_database( $sql_file ) {
+		private function get_database_statements( $sql_file ) {
+
+			if ( preg_match( '/^CREATE DATABASE/i', $sql_file ) ) {
+				$this->database_statements[] = $sql_file;
+			}
+			if ( preg_match( '/^DROP DATABASE/i', $sql_file ) ) {
+				$this->database_statements[] = $sql_file;
+			}
+
+		}
+
+		/**
+		 * Fill the $options_entries array with the values of wp_options table.
+		 * 
+		 * @param string $query The SQL data.
+		 */
+		private function get_options( $query ) {
+
+			if ( insert_to_array( $query, 'wp_options' ) ) {
+				$this->options_entries = array_merge( $this->options_entries, insert_to_array( $query, 'wp_options' ) );
+			}
+			
+		}
+
+		/**
+		 * Fill the $blogs_entries array with the values of wp_options table.
+		 * 
+		 * @param string $query The SQL data.
+		 */
+		private function get_blogs( $query ) {
+
+			if ( insert_to_array( $query, 'wp_blogs' ) ) {
+				$this->blogs_entries = array_merge( $this->blogs_entries, insert_to_array( $query, 'wp_blogs' ) );
+			}
+			
+		}
+
+		/** 
+		 * Check the prefix that are set up in the SQL file.
+		 * 
+		 * @param array $drop_tables All tables that have a DROP TABLE statement.
+		 * @param array $create_tables All tables that have a CREATE TABLE statement.
+		 */
+		private function validate_prefix( $drop_tables, $create_tables ) {
+			
+			if ( count( $drop_tables['nonwp'] ) > 0 ) {
+				WP_CLI::warning( 'We have found some DROP TABLE statements with a custom prefix.' );
+				WP_CLI::error_multi_line( $drop_tables['nonwp'] );
+			}
+			if ( count( $create_tables['nonwp'] ) > 0 ) {
+				WP_CLI::warning( 'We have found some CREATE TABLE statements with a custom prefix.' );
+				WP_CLI::error_multi_line( $create_tables['nonwp'] );
+			}
+
+		}
+
+		/**
+		 * Check the prefix that are set up in the SQL file.
+		 * 
+		 * @param array $drop_tables All tables that have a DROP TABLE statement.
+		 * @param array $create_tables All tables that have a CREATE TABLE statement.
+		 */
+		private function validate_matching_drop( $drop_tables, $create_tables ) {
+
+			foreach ( $create_tables['wp'] as $create_table ) {
+				if ( ! in_array( $create_table, $drop_tables['wp'] ) ) {
+					WP_CLI::warning( 'There is a missing drop statement for ' . $create_table );
+				}
+			}
+			foreach ( $create_tables['nonwp'] as $create_table ) {
+				if ( ! in_array( $create_table, $drop_tables['nonwp'] ) ) {
+					WP_CLI::warning( 'There is a missing drop statement for ' . $create_table );
+				}
+			}
+		}
+
+		/**
+		 * Check for the charset and display warnings if not set to UTF8MB4.
+		 * 
+		 * @param array $charsets Charsets found in the SQL file.
+		 */
+		private function validate_charset( $charsets ) {
+			WP_CLI::line( '' );
+			WP_CLI::line( 'Checking for charset...' );
+
+			if ( count( $charsets ) > 0 ) {
+				if ( ! empty( preg_grep( '/(utf8mb4|latin1|^utf8$)/i', $charsets ) ) ) {
+					if ( ! empty( preg_grep( '/utf8mb4/i', $charsets ) ) ) {
+						WP_CLI::success( 'We have found some UTF8MB4 charsets' );
+					} 
+					if ( ! empty( preg_grep( '/(latin1|^utf8$)/i', $charsets ) ) ) {
+						WP_CLI::warning( 'We have found some latin1 or UTF8 charsets that should be converted to UTF8MB4' );
+					}
+				} 
+				if ( ! empty( preg_grep( '/^(?!.*(utf8mb4|latin1|^utf8$)).*/i', $charsets ) ) ) {
+					WP_CLI::warning( 'We have found some custom charset, please check your SQL file' );
+				}
+			}
+		}
+
+		/**
+		 * Check if there is DROP TABLE statements
+		 * 
+		 * @param array $drop_tables Tables with a drop statement found in the file.
+		 */
+		private function validate_drop_table( $drop_tables ) {
+
+			if ( count( $drop_tables['wp'] ) ) {
+				if ( array_diff( $this->core_tables, $drop_tables['wp'] ) ) {
+					WP_CLI::warning( 'Missing core drop statement: ' );
+					WP_CLI::error_multi_line( array_diff( $this->core_tables, $drop_tables['wp'] ) );
+				} else {
+					WP_CLI::success( 'We have found all required DROP TABLE statements for core tables' );
+				}
+			} else {
+				WP_CLI::warning( 'There is no DROP TABLE statement for all core tables' );
+			}
+
+		}
+
+		/**
+		 * Check if there is CREATE TABLE statements.
+		 * 
+		 * @param array $create_tables Tables with a create statement found in the file.
+		 */
+		private function validate_create_table( $create_tables ) {
+
+			if ( count( $create_tables['wp'] ) ) {
+				if ( array_diff( $this->core_tables, $create_tables['wp'] ) ) {
+					WP_CLI::warning( 'Missing core create statement: ' );
+					WP_CLI::error_multi_line( array_diff( $this->core_tables, $create_tables['wp'] ) );
+				} else {
+					WP_CLI::success( 'We have found all required CREATE TABLE statements for core tables' );
+				}
+			} else {
+				WP_CLI::warning( 'There is no CREATE TABLE statement for all core tables' );
+			}
+		}
+
+		/**
+		 * Display a warning if there is a CREATE or DROP DATABASE statement.
+		 * 
+		 * @param array $database_statements Database statements found in the sql file.
+		 */
+		private function validate_database_statements( $database_statements ) {
+			
 			WP_CLI::line( '' );
 			WP_CLI::line( 'Checking for CREATE or DROP DATABASE statements...' );
-			if ( 0 === preg_match( '/CREATE DATABASE/i', $sql_file ) ) {
-				WP_CLI::success( 'There is no CREATE DATABASE statement' );
+
+			if ( count( $database_statements ) > 0 ) {
+				WP_CLI::warning( 'We have found some unwanted statemnents: ' );
+				WP_CLI::error_multi_line( $database_statements );
 			} else {
-				WP_CLI::warning( 'There is a CREATE DATABASE statement. This is not allowed when importing a database.' );
+				WP_CLI::success( 'There is no DATABASE statements' );
 			}
-			if ( 0 === preg_match( '/DROP DATABASE/i', $sql_file ) ) {
-				WP_CLI::success( 'There is no DROP DATABASE statement' );
+
+		}
+
+		/**
+		 * Check if there is DROP TABLE statements on a multisite SQL import
+		 * 
+		 * @param array $drop_tables Tables with a drop statement found in the file.
+		 */
+		private function validate_drop_table_multisite( $drop_tables ) {
+
+			if ( count( $drop_tables['wp'] ) ) {
+				if ( array_diff( $this->multisite_tables, $drop_tables['wp'] ) ) {
+					WP_CLI::warning( 'Missing multisite drop statement: ' );
+					WP_CLI::error_multi_line( array_diff( $this->multisite_tables, $drop_tables['wp'] ) );
+				} else {
+					WP_CLI::success( 'We have found all required DROP TABLE statements for multisite tables' );
+				}
 			} else {
-				WP_CLI::warning( 'There is a DROP DATABASE statement. This is not allowed when importing a database.' );
+				WP_CLI::warning( 'There is no DROP TABLE statement for all multisite tables' );
 			}
 		}
 
 		/**
-		 * Check if there is DROP TABLE statements for multisite
+		 * Check if there is CREATE TABLE statements.
 		 * 
-		 * @param string $sql_file The SQL data.
-		 * @param array  $multisite_tables The WordPress multisite tables.
-		 * 
-		 * return int Number of DROP TABLE statements.
+		 * @param array $create_tables Tables with a create statement found in the file.
 		 */
-		private function validate_drop_table_multisite( $sql_file, $multisite_tables ) {
-			WP_CLI::line( '' );
-			WP_CLI::line( 'Checking for DROP TABLE statements for multisite...' );
+		private function validate_create_table_multisite( $create_tables ) {
 
-			$tables_size      = count( $multisite_tables );
-			$multisite_tables = ( implode( '|', $multisite_tables ) );
-
-			preg_match_all( '/DROP TABLE.*(' . $multisite_tables . ')/i', $sql_file, $multisite_matches );
-			
-			if ( count( $multisite_matches[1] ) === $tables_size ) {
-				WP_CLI::success( 'We have found a DROP TABLE statement for each multisite tables' );
+			if ( count( $create_tables['wp'] ) ) {
+				if ( array_diff( $this->multisite_tables, $create_tables['wp'] ) ) {
+					WP_CLI::warning( 'Missing multisite create statement: ' );
+					WP_CLI::error_multi_line( array_diff( $this->multisite_tables, $create_tables['wp'] ) );
+				} else {
+					WP_CLI::success( 'We have found all required CREATE TABLE statements for multisite tables' );
+				}
 			} else {
-				WP_CLI::warning( 'We have not found any DROP TABLE statement for each multisite tables' );
+				WP_CLI::warning( 'There is no create statement for multisite tables' );
 			}
-
-			return count( $multisite_matches[1] );
-		}
-
-		/**
-		 * Check if there is CREATE TABLE statements
-		 * 
-		 * @param string $sql_file The SQL data.
-		 * @param array  $multisite_tables The WordPress multisite tables.
-		 * 
-		 * return int Number of DROP TABLE statements.
-		 */
-		private function validate_create_table_multisite( $sql_file, $multisite_tables ) {
-			WP_CLI::line( '' );
-			WP_CLI::line( 'Checking for CREATE TABLE statements for multisite...' );
-
-			$tables_size      = count( $multisite_tables );
-			$multisite_tables = ( implode( '|', $multisite_tables ) );
-
-			preg_match_all( '/CREATE TABLE.*(' . $multisite_tables . ')/i', $sql_file, $multisite_matches );
-			
-			if ( count( $multisite_matches[1] ) === $tables_size ) {
-				WP_CLI::success( 'We have found a CREATE TABLE statement for each multisite tables' );
-			} else {
-				WP_CLI::warning( 'We have not found a CREATE TABLE statement for each multisite tables' );
-			}
-			
-			return count( $multisite_matches[1] );
 		}
 
 		/**
 		 * Check entries of the wp_blogs table.
 		 * 
-		 * @param array $sql_array The entries of the specific table as an array.
+		 * @param array $blogs_entries The entries of the wp_blogs table as an array.
 		 */
-		private function validate_wpblogs( $sql_array ) {
+		private function validate_blogs_entries( $blogs_entries ) {
 
 			WP_CLI::line( '' );
 			WP_CLI::line( 'Checking for wp_blogs table...' );
 
-			$entries = insert_to_array( $sql_array, 'wp_blogs' );
 			$lookfor = array( 'blog_id', 'site_id', 'domain', 'path' );
-			
-			
+
 			// display tables.
-			WP_CLI::line( 'We have found ' . count( $entries ) . ' entries.' );
-			WP_CLI\Utils\format_items( 'table', $entries, $lookfor );
-			foreach ( $entries as $entry ) {
+			WP_CLI::line( 'We have found ' . count( $blogs_entries ) . ' entries.' );
+			WP_CLI\Utils\format_items( 'table', $blogs_entries, $lookfor );
+			foreach ( $blogs_entries as $entry ) {
 				if ( ! isset( $entry['domain'] ) || '' === $entry['domain'] ) {
 					WP_CLI::warning( 'No domain set up for blog_id ' . $entry['blog_id'] );
 				}
@@ -359,24 +468,23 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		/**
 		 * Check siteurl and home of the wp_otions table.
 		 * 
-		 * @param array $sql_array The entries of the specific table as an array.
+		 * @param array $options_entries The entries of the wp_options table as an array.
 		 */
-		private function validate_settings( $sql_array ) {
+		private function validate_options_entries( $options_entries ) {
 
 			WP_CLI::line( '' );
 			WP_CLI::line( 'Checking for siteurl and home options...' );
 
-			$entries = insert_to_array( $sql_array, 'wp_options' );
 			$lookfor = array( 'option_name', 'option_value' );
 			
-			if ( ! empty( $entries ) ) {
-				foreach ( $entries as $key => $entry ) {
+			if ( ! empty( $options_entries ) ) {
+				foreach ( $options_entries as $key => $entry ) {
 					if ( 'siteurl' !== $entry['option_name'] && 'home' !== $entry['option_name'] ) {
-						unset( $entries[ $key ] );
+						unset( $options_entries[ $key ] );
 					}
 				}
-				WP_CLI::line( 'We have found ' . count( $entries ) . ' entries.' );
-				WP_CLI\Utils\format_items( 'table', $entries, $lookfor );
+				WP_CLI::line( 'We have found ' . count( $options_entries ) . ' entries.' );
+				WP_CLI\Utils\format_items( 'table', $options_entries, $lookfor );
 			} else {
 				WP_CLI::warning( 'Unable to find the wp_options table.' );
 			}
