@@ -19,29 +19,6 @@ function remove_comment( $sql_file ) {
 }
 
 /**
- * Transform the SQL file into an array of SQL statements
- * 
- * @param string $sql_file The SQL data.
- * @param string $delimiter The delimiter used in the SQL file.
- * 
- * return array $data The SQL data in an array.
- */
-function split_sql_file( $sql_file, $delimiter ) {
-	$sql_file = str_replace( "\r", '', $sql_file );
-	$data     = preg_split( '/' . preg_quote( $delimiter, '/' ) . '$/m', $sql_file );
-	$data     = array_map( 'trim', $data );
-
-	// The empty case.
-	$end_data = end( $data );
-
-	if ( empty( $end_data ) ) {
-		unset( $data[ key( $data ) ] );
-	}
-
-	return $data;
-}
-
-/**
  * Transform values of an INSERT statement into an array of entries
  * 
  * @param string $query The SQL query.
