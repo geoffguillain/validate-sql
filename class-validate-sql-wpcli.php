@@ -1,35 +1,76 @@
 <?php
 /**
  * WP CLI command that takes a .sql file and validate multiple rules before importing.
+ * 
+ * @package validate-sql
  */
 
 if ( defined( 'WP_CLI' ) && WP_CLI ) {
 
-	require_once 'sql-parser.php';
-
 	/**
 	 * Check if the .sql file is ready to be imported.
 	 */
-	class ValidateSQLWPCLI {
+	class Validate_SQL_WPCLI {
 
+		/** 
+		 * DROP TABLE statements that are found in the SQL file.
+		 * 
+		 * @see get_drop_tables()
+		 * @var array
+		 */
 		private $drop_tables = array( 
 			'wp'    => array(),
 			'nonwp' => array(),
 		);
 
+		/** 
+		 * CREATE TABLE statements that are found in the SQL file.
+		 * 
+		 * @see create_drop_tables()
+		 * @var array
+		 */
 		private $create_tables = array( 
 			'wp'    => array(),
 			'nonwp' => array(),
 		);
 
+		/** 
+		 * Charsets that are found in the SQL file.
+		 * 
+		 * @see get_charset()
+		 * @var array
+		 */
 		private $charsets = array();
 
+		/** 
+		 * CREATE or DELETE DATABASE statements that are found in the SQL file.
+		 * 
+		 * @see get_database_statements()
+		 * @var array
+		 */
 		private $database_statements = array();
 
+		/** 
+		 * Entries from wp_options that are found in the SQL file.
+		 * 
+		 * @see validate_options_entries()
+		 * @var array
+		 */
 		private $options_entries = array();
 
+		/** 
+		 * Entries from wp_blogs that are found in the SQL file.
+		 * 
+		 * @see get_blogs()
+		 * @var array
+		 */
 		private $blogs_entries = array();
 
+		/** 
+		 * The list of the core tables used by WordPress.
+		 * 
+		 * @var array
+		 */
 		private $core_tables = array(
 			'wp_commentmeta',
 			'wp_comments',
@@ -45,6 +86,11 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 			'wp_users',
 		);
 
+		/** 
+		 * The list of the multisite tables used by WordPress.
+		 * 
+		 * @var array
+		 */
 		private $multisite_tables = array(
 			'wp_blogs',
 			'wp_blogmeta',
@@ -128,6 +174,58 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		}
 
 		/**
+		 * Remove all comments from the SQL file
+		 * 
+		 * @param string $sql_file The SQL data.
+		 * 
+		 * return string $sql_file The SQl data without any comments.
+		 */
+		private function remove_comment( $sql_file ) {
+			$sql_file = preg_replace( '/^#.*$/', '', $sql_file );
+			// Remove /*! */; comments.
+			$sql_file = preg_replace( '#/\*!(.|[\r\n])*?\*/;#', '', $sql_file );
+			// Remove /* */ comments.
+			$sql_file = preg_replace( '#/\*(.|[\r\n])*?\*/#', '', $sql_file );
+			// Remove # style comments.
+			$sql_file = preg_replace( '/\n{2,}/', '', preg_replace( '/^#.*$/m', '', $sql_file ) );
+			return $sql_file;
+		}
+
+		/**
+		 * Transform values of an INSERT statement into an array of entries
+		 * 
+		 * @param string $query The SQL query.
+		 * @param string $table The table we want to get the values from.
+		 * 
+		 * return array $blogs_array The entries of the specific table as an array or an empty array.
+		 */
+		private function insert_to_array( $query, $table ) {
+			
+			$blogs_array = array();
+
+			if ( preg_match( '/INSERT INTO.*' . $table . '/i', $query ) ) {
+				preg_match_all( '/\((?>[^)(]+|(?R))*+\)/', $query, $matches );
+				$indexes = preg_replace( '/[(\'" `)]/', '', $matches[0][0] );
+				$indexes = explode( ',', $indexes );
+				unset( $matches[0][0] );
+				
+				$blogs_array_size = count( $blogs_array );
+				foreach ( $matches[0] as $key => $match ) {
+					$entry = trim( $match, '/[()]/' );
+					$entry = explode( ',', $entry );
+					foreach ( $indexes as $index_key => $index ) {
+						if ( isset( $entry[ $index_key ] ) ) {
+							$blogs_array[ $blogs_array_size + $key ][ $index ] = trim( $entry[ $index_key ], '/[\'" `]/' );
+						} else {
+							$blogs_array[ $blogs_array_size + $key ][ $index ] = null;
+						}
+					}
+				}
+			}
+			return $blogs_array;
+		}
+
+		/**
 		 * Process the SQL file trought multiple validation steps.
 		 * 
 		 * @param string $file Path to SQL file.
@@ -144,7 +242,7 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 						$query[] = fgets( $file );
 						if ( preg_match( '/' . preg_quote( $delimiter, '/' ) . '$/m', end( $query ) ) ) {
 							$query = trim( implode( '', $query ) );
-							$query = remove_comment( $query );
+							$query = $this->remove_comment( $query );
 
 							$this->get_drop_tables( $query );
 							$this->get_create_tables( $query );
@@ -262,8 +360,8 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		 */
 		private function get_options( $query ) {
 
-			if ( insert_to_array( $query, 'wp_options' ) ) {
-				$this->options_entries = array_merge( $this->options_entries, insert_to_array( $query, 'wp_options' ) );
+			if ( $this->insert_to_array( $query, 'wp_options' ) ) {
+				$this->options_entries = array_merge( $this->options_entries, $this->insert_to_array( $query, 'wp_options' ) );
 			}
 			
 		}
@@ -275,8 +373,8 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		 */
 		private function get_blogs( $query ) {
 
-			if ( insert_to_array( $query, 'wp_blogs' ) ) {
-				$this->blogs_entries = array_merge( $this->blogs_entries, insert_to_array( $query, 'wp_blogs' ) );
+			if ( $this->insert_to_array( $query, 'wp_blogs' ) ) {
+				$this->blogs_entries = array_merge( $this->blogs_entries, $this->insert_to_array( $query, 'wp_blogs' ) );
 			}
 			
 		}
@@ -492,5 +590,5 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		}
 
 	}
-	WP_CLI::add_command( 'validate-sql', 'ValidateSQLWPCLI' );
+	WP_CLI::add_command( 'validate-sql', 'Validate_SQL_WPCLI' );
 }
