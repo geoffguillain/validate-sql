@@ -387,6 +387,9 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		 */
 		private function validate_prefix( $drop_tables, $create_tables ) {
 			
+			WP_CLI::line( '' );
+			WP_CLI::line( 'Checking for table prefix...' );
+
 			if ( count( $drop_tables['nonwp'] ) > 0 ) {
 				WP_CLI::warning( 'We have found some DROP TABLE statements with a custom prefix.' );
 				WP_CLI::error_multi_line( $drop_tables['nonwp'] );
@@ -406,15 +409,25 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		 */
 		private function validate_matching_drop( $drop_tables, $create_tables ) {
 
+			WP_CLI::line( '' );
+			WP_CLI::line( 'Checking if all CREATE TABLE statements have a matching DROP TABLE statement...' );
+
+			$matching_error = 0;
 			foreach ( $create_tables['wp'] as $create_table ) {
 				if ( ! in_array( $create_table, $drop_tables['wp'] ) ) {
 					WP_CLI::warning( 'There is a missing drop statement for ' . $create_table );
+					$matching_error++;
 				}
 			}
 			foreach ( $create_tables['nonwp'] as $create_table ) {
 				if ( ! in_array( $create_table, $drop_tables['nonwp'] ) ) {
 					WP_CLI::warning( 'There is a missing drop statement for ' . $create_table );
+					$matching_error++;
 				}
+			}
+
+			if ( 0 === $matching_error ) {
+				WP_CLI::success( 'We have found a matching DROP TABLE statement for each table.' );
 			}
 		}
 
@@ -424,6 +437,7 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		 * @param array $charsets Charsets found in the SQL file.
 		 */
 		private function validate_charset( $charsets ) {
+
 			WP_CLI::line( '' );
 			WP_CLI::line( 'Checking for charset...' );
 
@@ -449,6 +463,9 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		 */
 		private function validate_drop_table( $drop_tables ) {
 
+			WP_CLI::line( '' );
+			WP_CLI::line( 'Validating WP core DROP TABLE statements...' );
+
 			if ( count( $drop_tables['wp'] ) ) {
 				if ( array_diff( $this->core_tables, $drop_tables['wp'] ) ) {
 					WP_CLI::warning( 'Missing core drop statement: ' );
@@ -468,6 +485,9 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		 * @param array $create_tables Tables with a create statement found in the file.
 		 */
 		private function validate_create_table( $create_tables ) {
+
+			WP_CLI::line( '' );
+			WP_CLI::line( 'Validating WP core CREATE TABLE statements...' );
 
 			if ( count( $create_tables['wp'] ) ) {
 				if ( array_diff( $this->core_tables, $create_tables['wp'] ) ) {
@@ -507,6 +527,9 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		 */
 		private function validate_drop_table_multisite( $drop_tables ) {
 
+			WP_CLI::line( '' );
+			WP_CLI::line( 'Validating WP multisite DROP TABLE statements...' );
+
 			if ( count( $drop_tables['wp'] ) ) {
 				if ( array_diff( $this->multisite_tables, $drop_tables['wp'] ) ) {
 					WP_CLI::warning( 'Missing multisite drop statement: ' );
@@ -525,6 +548,9 @@ if ( defined( 'WP_CLI' ) && WP_CLI ) {
 		 * @param array $create_tables Tables with a create statement found in the file.
 		 */
 		private function validate_create_table_multisite( $create_tables ) {
+
+			WP_CLI::line( '' );
+			WP_CLI::line( 'Validating WP multisite CREATE TABLE statements...' );
 
 			if ( count( $create_tables['wp'] ) ) {
 				if ( array_diff( $this->multisite_tables, $create_tables['wp'] ) ) {
